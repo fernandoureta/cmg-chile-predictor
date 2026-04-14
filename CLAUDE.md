@@ -91,7 +91,7 @@ CMG_CHILE_PREDICTOR/
 ### Datos
 - Período de datos: 2018-01-01 en adelante
 - Split cronológico estricto (sin fugas):
-  - Train: 2018-01-01 → 2023-06-30
+  - Train: 2021-01-01 → 2023-06-30
   - Validación: 2023-07-01 → 2023-12-31
   - Test: 2024-01-01 → 2024-12-31 (solo para reporte final)
 - Zona horaria: todo normalizado a `America/Santiago`, almacenado en UTC en PostgreSQL
