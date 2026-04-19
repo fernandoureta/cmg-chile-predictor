@@ -266,3 +266,8 @@ streamlit run dashboard/app.py
 8. Notebooks EDA y modelos
 9. Dashboard Streamlit
 10. `cen_demand.py` con Selenium (fase posterior)
+
+Escribe el código directamente en el archivo etl/pipeline.py 
+usando tus herramientas de edición de archivos. No me lo 
+muestres en el chat, escríbelo en el archivo directamente.
+Luego confírmame que el archivo fue creado correctamente.
