@@ -54,11 +54,11 @@ CMG_CHILE_PREDICTOR/
 │   │   ├── cen_marginal.py         ✅ completo y funcionando
 │   │   ├── cen_generation.py       ✅ completo y funcionando
 │   │   ├── cen_demand.py           ⬜ pendiente (ver nota abajo)
-│   │   ├── cen_reservoirs.py       ⬜ pendiente
-│   │   └── weather.py              ⬜ pendiente
-│   ├── transform.py                ⬜ pendiente
-│   ├── load.py                     ⬜ pendiente
-│   ├── pipeline.py                 ⬜ pendiente
+│   │   ├── cen_reservoirs.py       ✅ completo y funcionando
+│   │   └── weather.py              ✅ completo y funcionando
+│   ├── transform.py                ✅ completo y funcionando
+│   ├── load.py                     ✅ completo y funcionando
+│   ├── pipeline.py                 ✅ completo y funcionando
 │   └── scheduler.py                ⬜ pendiente
 ├── features/
 │   └── build_features.py           ⬜ pendiente
@@ -160,11 +160,11 @@ MAE, RMSE, MAPE, R². Precaución: MAPE se infla cuando CMG ≈ 0
 
 | Tabla | Registros | Período | Estado |
 |---|---|---|---|
-| `marginal_costs` | 48.523 | 2019-01 → 2024-07 | ✅ cargada |
-| `generation_by_tech` | 35.060 | 2021-01 → 2024-12 | ✅ cargada |
+| `marginal_costs` | 48.523 | 2019-01 → 2024-07 | ✅ cargada (pipeline verificado, idempotente) |
+| `generation_by_tech` | 35.060 | 2021-01 → 2024-12 | ✅ cargada (pipeline verificado, idempotente) |
 | `demand` | 0 | — | ⬜ pendiente Selenium |
-| `reservoir_levels` | 0 | — | ⬜ pendiente |
-| `weather` | 0 | — | ⬜ pendiente |
+| `reservoir_levels` | 85 | 2019-01 → 2026-01 | ✅ cargada (pipeline verificado, idempotente) |
+| `weather` | 2.192 | 2019-01 → 2024-12 | ✅ cargada (pipeline verificado, idempotente) |
 | `predictions` | 0 | — | se llena al evaluar modelos |
 
 ---
@@ -256,18 +256,13 @@ streamlit run dashboard/app.py
 
 ## Próximos pasos en orden
 
-1. `cen_reservoirs.py` — explorar formulario CEN y descargar datos
-2. `weather.py` — consumir Open-Meteo API para temperatura/precipitaciones
-3. `etl/transform.py` — limpieza centralizada
-4. `etl/load.py` — función de carga genérica
-5. `etl/pipeline.py` — orquestador completo
-6. `db/feature_store.sql` — ejecutar cuando estén todos los datos
-7. `features/build_features.py` — lags, rolling, encoding cíclico
-8. Notebooks EDA y modelos
-9. Dashboard Streamlit
-10. `cen_demand.py` con Selenium (fase posterior)
-
-Escribe el código directamente en el archivo etl/pipeline.py 
-usando tus herramientas de edición de archivos. No me lo 
-muestres en el chat, escríbelo en el archivo directamente.
-Luego confírmame que el archivo fue creado correctamente.
+1. ✅ `cen_reservoirs.py` — explorar formulario CEN y descargar datos
+2. ✅ `weather.py` — consumir Open-Meteo API para temperatura/precipitaciones
+3. ✅ `etl/transform.py` — limpieza centralizada
+4. ✅ `etl/load.py` — función de carga genérica
+5. ✅ `etl/pipeline.py` — orquestador completo
+6. ⬜ `db/feature_store.sql` — ejecutar cuando estén todos los datos
+7. ⬜ `features/build_features.py` — lags, rolling, encoding cíclico
+8. ⬜ Notebooks EDA y modelos
+9. ⬜ Dashboard Streamlit
+10. ⬜ `cen_demand.py` con Selenium (fase posterior)
