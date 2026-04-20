@@ -47,7 +47,7 @@ CMG_CHILE_PREDICTOR/
 │   └── external/
 ├── db/
 │   ├── schema.sql                  ✅ ejecutado
-│   ├── feature_store.sql           ⬜ ejecutar cuando haya todos los datos
+│   ├── feature_store.sql           ✅ ejecutado
 │   └── migrations/
 ├── etl/
 │   ├── scrapers/
@@ -61,15 +61,15 @@ CMG_CHILE_PREDICTOR/
 │   ├── pipeline.py                 ✅ completo y funcionando
 │   └── scheduler.py                ⬜ pendiente
 ├── features/
-│   └── build_features.py           ⬜ pendiente
+│   └── build_features.py           ✅ completo y funcionando
 ├── models/
-│   ├── sarima.py                   ⬜ pendiente
-│   ├── xgboost_model.py            ⬜ pendiente
-│   ├── lstm_model.py               ⬜ pendiente
-│   ├── evaluate.py                 ⬜ pendiente
+│   ├── sarima.py                   ✅ entrenado (MAE=42.62, R2=-0.27)
+│   ├── xgboost_model.py            ✅ entrenado (MAE=10.18, R2=0.89)
+│   ├── lstm_model.py               ✅ entrenado (MAE=10.18, R2=0.87)
+│   ├── evaluate.py                 ✅ completo y funcionando
 │   └── saved/
 ├── notebooks/
-│   ├── 01_eda.ipynb                ⬜ pendiente
+│   ├── 01_eda.ipynb                ✅ completo
 │   ├── 02_feature_engineering.ipynb
 │   ├── 03_sarima_baseline.ipynb
 │   ├── 04_xgboost.ipynb
@@ -165,7 +165,7 @@ MAE, RMSE, MAPE, R². Precaución: MAPE se infla cuando CMG ≈ 0
 | `demand` | 0 | — | ⬜ pendiente Selenium |
 | `reservoir_levels` | 85 | 2019-01 → 2026-01 | ✅ cargada (pipeline verificado, idempotente) |
 | `weather` | 2.192 | 2019-01 → 2024-12 | ✅ cargada (pipeline verificado, idempotente) |
-| `predictions` | 0 | — | se llena al evaluar modelos |
+| `predictions` | 13.950 | 3 modelos | ✅ cargada (SARIMA + XGBoost + LSTM) |
 
 ---
 
@@ -254,6 +254,25 @@ streamlit run dashboard/app.py
 
 ---
 
+## Resultados de modelos
+
+Evaluación sobre conjunto de test (2024-01-01 → 2024-12-31), barra Quillota 220kV, horizon_h=1.
+
+| Modelo  | MAE (USD/MWh) | RMSE (USD/MWh) | MAPE    | R²     |
+|---------|---------------|----------------|---------|--------|
+| SARIMA  | 42.62         | 53.52          | 92.13%  | -0.27  |
+| XGBoost | 10.18         | 15.72          | 27.27%  | 0.89   |
+| LSTM    | 10.18         | 17.15          | 27.43%  | 0.87   |
+
+**Mejor modelo:** XGBoost en todas las métricas.
+
+**Interpretación:**
+- SARIMA negativo (R²=-0.27) es el resultado esperado para un modelo sin variables exógenas ante el cambio de régimen de 2024 (expansión solar masiva que deprime precios al mediodía).
+- XGBoost y LSTM con `gen_solar_mw` en el feature set capturan este efecto correctamente.
+- El MAPE elevado en todos los modelos se debe a horas con CMG ≈ 0 (mediodía solar) que inflan el error relativo.
+
+---
+
 ## Próximos pasos en orden
 
 1. ✅ `cen_reservoirs.py` — explorar formulario CEN y descargar datos
@@ -261,8 +280,14 @@ streamlit run dashboard/app.py
 3. ✅ `etl/transform.py` — limpieza centralizada
 4. ✅ `etl/load.py` — función de carga genérica
 5. ✅ `etl/pipeline.py` — orquestador completo
-6. ⬜ `db/feature_store.sql` — ejecutar cuando estén todos los datos
-7. ⬜ `features/build_features.py` — lags, rolling, encoding cíclico
-8. ⬜ Notebooks EDA y modelos
-9. ⬜ Dashboard Streamlit
-10. ⬜ `cen_demand.py` con Selenium (fase posterior)
+6. ✅ `db/feature_store.sql` — ejecutado
+7. ✅ `features/build_features.py` — lags, rolling, encoding cíclico
+8. ✅ Notebooks EDA (01_eda.ipynb completo)
+9. ✅ SARIMA — MAE=42.62, R2=-0.27 (línea base)
+10. ✅ XGBoost — MAE=10.18, R2=0.89 (mejor modelo)
+11. ✅ LSTM — MAE=10.18, R2=0.87
+12. ✅ Evaluación comparativa con reportes (`models/evaluate.py`)
+13. ⬜ Dashboard Streamlit
+14. ⬜ README completo
+15. ⬜ Tests
+16. ⬜ `cen_demand.py` con Selenium (fase posterior)

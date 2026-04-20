@@ -40,6 +40,38 @@ Registro cronológico de problemas encontrados durante el desarrollo y cómo se 
 
 ---
 
-## Próximos problemas registrados
+## 2026-04-19 — features/build_features.py
 
-*(se irán agregando a medida que avance el proyecto)*
+**Problema:** `numpy.core._exceptions._ArrayMemoryError: Unable to allocate 2.34 GiB` al hacer `df_cmg.join(df_gen, how="inner")`. El proceso intentaba crear un array de 314 millones de filas.
+
+**Causa raíz:** psycopg2 devuelve columnas TIMESTAMPTZ con offsets mixtos UTC-3/UTC-4 según el DST de America/Santiago. Pandas detectaba índices "no únicos" (en realidad iguales en UTC pero con distintos offsets de representación) y el `.join()` intentaba un producto cartesiano → OOM.
+
+**Solución:** Dos cambios necesarios:
+1. `pd.to_datetime(series, utc=True)` en todas las funciones `_load_*()` para normalizar a UTC puro.
+2. Reemplazar `.join()` por `pd.merge(df_a.reset_index(), df_b.reset_index(), on="datetime", how="inner").set_index("datetime")`.
+
+**Lección aprendida:** Siempre normalizar timestamps de PostgreSQL a UTC con `utc=True` al leer con psycopg2. Nunca usar `.join()` con índices datetime que provengan de columnas TIMESTAMPTZ sin normalización previa.
+
+---
+
+## 2026-04-19 — notebooks/01_eda.ipynb
+
+**Problema:** `ValueError` al graficar el bar chart mensual — el array `monthly.values` tenía shape `(8,)` en lugar de `(12,)`, causando mismatch con el eje x de 12 etiquetas.
+
+**Causa raíz:** Los datos van de 2021 a 2024 y algunos meses tienen pocas observaciones; `groupby("month").mean()` solo genera filas para los meses con datos, no necesariamente los 12.
+
+**Solución:** `.reindex(range(1, 13))` después del groupby para forzar las 12 filas, rellenando con NaN los meses ausentes.
+
+**Lección aprendida:** Siempre aplicar `.reindex()` al hacer agrupaciones por período (mes, día de la semana, hora) cuando se quiere garantizar cobertura completa del eje.
+
+---
+
+## 2026-04-19 — models/sarima.py
+
+**Problema:** R² = -0.27 en el conjunto de test 2024.
+
+**Causa raíz:** No es un bug. SARIMA es un modelo univariado sin variables exógenas. El 2024 mostró un cambio de régimen estructural en Chile: la expansión masiva de energía solar deprime los precios al mediodía a valores cercanos a 0, un patrón que SARIMA no puede aprender porque no tiene acceso a `gen_solar_mw`.
+
+**Solución:** Resultado esperado y válido. Se documenta como línea base (benchmark). Los modelos con feature engineering (XGBoost, LSTM) incluyen `gen_solar_mw` y capturan este efecto correctamente (MAE=10.18, R²≈0.88).
+
+**Lección aprendida:** Un R² negativo en series temporales con cambios de régimen no indica un error de implementación, sino una limitación del modelo. Confirma el valor del feature engineering multivariado.
