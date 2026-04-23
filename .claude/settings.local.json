@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(venv/Scripts/python -c ' *)"
+      "Bash(venv/Scripts/python -c ' *)",
+      "Bash(python -c 'import json; nb=json.load\\(open\\('\\\\''__TRACKED_VAR__'\\\\''\\)\\); cells=nb['\\\\''cells'\\\\'']; non_empty=[c for c in cells if any\\(l.strip\\(\\) for l in c['\\\\''source'\\\\'']\\)]; print\\(f'\\\\''  Total celdas: {len\\(cells\\)}, con contenido: {len\\(non_empty\\)}'\\\\''\\)')"
     ]
   }
 }
