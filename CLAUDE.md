@@ -35,16 +35,14 @@ Proyecto de portafolio GitHub — Ingeniería en Informática.
 ```
 CMG_CHILE_PREDICTOR/
 ├── data/
-│   ├── raw/
-│   │   ├── cmg_quillota_2019.tsv   ✅ descargado
-│   │   ├── cmg_quillota_2020.tsv   ✅ descargado
-│   │   ├── cmg_quillota_2021.tsv   ✅ descargado
-│   │   ├── cmg_quillota_2022.tsv   ✅ descargado
-│   │   ├── cmg_quillota_2023.tsv   ✅ descargado
-│   │   ├── cmg_quillota_2024.tsv   ✅ descargado
-│   │   └── gen_real_2021-2024.tsv  ✅ descargado
-│   ├── processed/
-│   └── external/
+│   └── raw/
+│       ├── cmg_quillota_2019.tsv   ✅ descargado
+│       ├── cmg_quillota_2020.tsv   ✅ descargado
+│       ├── cmg_quillota_2021.tsv   ✅ descargado
+│       ├── cmg_quillota_2022.tsv   ✅ descargado
+│       ├── cmg_quillota_2023.tsv   ✅ descargado
+│       ├── cmg_quillota_2024.tsv   ✅ descargado
+│       └── gen_real_2021-2024.tsv  ✅ descargado
 ├── db/
 │   ├── schema.sql                  ✅ ejecutado
 │   ├── feature_store.sql           ✅ ejecutado
@@ -69,22 +67,15 @@ CMG_CHILE_PREDICTOR/
 │   ├── evaluate.py                 ✅ completo y funcionando
 │   └── saved/
 ├── notebooks/
-│   ├── 01_eda.ipynb                ✅ completo
-│   ├── 02_feature_engineering.ipynb
-│   ├── 03_sarima_baseline.ipynb
-│   ├── 04_xgboost.ipynb
-│   ├── 05_lstm.ipynb
-│   └── 06_comparison.ipynb
+│   └── 01_eda.ipynb                ✅ completo
 ├── dashboard/
-│   ├── app.py                      ⬜ pendiente
-│   └── components/
+│   └── app.py                      ✅ completo y funcionando
 ├── tests/
-│   ├── test_etl.py                 ⬜ pendiente
-│   ├── test_features.py            ⬜ pendiente
-│   └── test_models.py              ⬜ pendiente
+│   ├── test_etl.py                 ✅ 6 tests pasando
+│   ├── test_features.py            ✅ 4 tests pasando
+│   └── test_models.py              ✅ 4 tests pasando
 ├── docs/
-│   ├── CMG_Chile_Predictor_Manual.docx
-│   └── Guia_Estudio_CMG.docx
+│   └── CMG_Chile_Predictor_Manual.docx
 ├── PROBLEMAS_Y_SOLUCIONES.md       ✅ iniciado
 ├── config.py                       ✅ completo
 ├── requirements.txt                ✅ completo
@@ -287,7 +278,17 @@ Evaluación sobre conjunto de test (2024-01-01 → 2024-12-31), barra Quillota 2
 10. ✅ XGBoost — MAE=10.18, R2=0.89 (mejor modelo)
 11. ✅ LSTM — MAE=10.18, R2=0.87
 12. ✅ Evaluación comparativa con reportes (`models/evaluate.py`)
-13. ⬜ Dashboard Streamlit
-14. ⬜ README completo
-15. ⬜ Tests
+13. ✅ Dashboard Streamlit — 3 páginas interactivas con Plotly
+14. ✅ README completo con arquitectura, resultados e instrucciones
+15. ✅ Tests — 14 tests (test_etl, test_features, test_models)
 16. ⬜ `cen_demand.py` con Selenium (fase posterior)
+17. ⬜ Despliegue en la nube con Docker
+18. ⬜ Temporal Fusion Transformer
+
+---
+
+## Estado final del proyecto
+
+**Fecha:** 2026-04-22
+
+Proyecto completado. 14/14 tests pasando. Dashboard funcional. Tres modelos entrenados y evaluados sobre datos reales del CEN.
