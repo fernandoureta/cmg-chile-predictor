@@ -7,3 +7,6 @@ models/saved/*.pkl
 data/raw/*
 data/processed/*
 data/external/*
+
+# Configuracion local de Claude Code
+.claude/
