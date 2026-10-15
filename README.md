@@ -14,7 +14,7 @@
 
 El **Costo Marginal de la Energía (CMG)** es el precio al que el sistema eléctrico valora la última unidad de energía despachada en cada hora. En Chile, el Coordinador Eléctrico Nacional (CEN) lo calcula y publica cada hora para cada barra del Sistema Eléctrico Nacional. Es la señal económica central del mercado: determina contratos de largo plazo, ingresos de generadores, costos de grandes consumidores industriales y mineros, y el valor de las coberturas financieras. La barra **Quillota 220kV** es una de las referencias de mayor liquidez del Sistema Interconectado Central.
 
-Este proyecto implementa un pipeline completo de predicción del CMG horario: descarga y procesa datos abiertos del CEN y Open-Meteo, los almacena en PostgreSQL, construye una feature matrix de 29 variables con ingeniería temporal y energética, y entrena tres modelos de distinta complejidad — SARIMA como línea base estadística, XGBoost con gradient boosting y una red LSTM con ventana de 168 horas — evaluándolos sobre un conjunto de test cronológico estricto (todo el año 2024). Los resultados se exponen en un dashboard interactivo Streamlit con Plotly.
+Este proyecto implementa un pipeline completo de predicción del CMG horario: descarga y procesa datos abiertos del CEN y Open-Meteo, los almacena en PostgreSQL, construye 29 features con ingeniería temporal y energética, y compara tres modelos de distinta complejidad — SARIMA, XGBoost y una red LSTM con ventana de 168 horas — contra dos líneas base ingenuas (persistencia y estacional 24h). Todos predicen la hora siguiente (T+1) y se evalúan sobre exactamente las mismas 4.707 horas de un test cronológico estricto (enero–julio 2024). Los resultados se exponen en un dashboard interactivo Streamlit con Plotly.
 
 Los datos provienen exclusivamente del **Coordinador Eléctrico Nacional** (coordinador.cl), organismo público regulado que publica datos de operación del sistema eléctrico bajo licencia de datos abiertos. La temperatura diaria se obtiene de la API gratuita Open-Meteo.
 
@@ -22,21 +22,33 @@ Los datos provienen exclusivamente del **Coordinador Eléctrico Nacional** (coor
 
 ## Resultados
 
-Evaluación sobre **conjunto de test independiente: 2024-01-01 → 2024-12-31** (8.760 horas, nunca vistas durante entrenamiento ni validación).
+Evaluación sobre el **conjunto de test independiente: 2024-01-01 00:00 UTC → 2024-07-15 03:00 UTC** (31-dic-2023 21:00 → 14-jul-2024 23:00 hora de Chile; **4.707 horas, ≈ 6,5 meses**, hasta el último dato de CMG disponible). Ningún dato de este periodo se usó para entrenar ni para seleccionar hiperparámetros. Todos los modelos predicen **una hora hacia adelante** y se evalúan sobre **exactamente las mismas filas**.
 
-| Modelo  | MAE (USD/MWh) | RMSE (USD/MWh) | MAPE    | R²    |
-|---------|:-------------:|:--------------:|:-------:|:-----:|
-| SARIMA  | 42.62         | 53.52          | 92.13%  | -0.27 |
-| **XGBoost** | **10.18** | **15.72**  | **27.27%** | **0.89** |
-| LSTM    | 10.18         | 17.15          | 27.43%  | 0.87  |
+| Modelo | MAE (USD/MWh) | RMSE (USD/MWh) | MAPE | R² | Mejora vs persistencia |
+|--------|:-------------:|:--------------:|:----:|:--:|:----------------------:|
+| **SARIMA** | **9.09** | **15.35** | **22.69%** | **0.895** | **+22.8%** |
+| LSTM | 9.95 | 17.50 | 29.70% | 0.864 | +15.4% |
+| XGBoost | 10.38 | 16.99 | 28.16% | 0.872 | +11.8% |
+| *Persistencia* (T-1) | 11.77 | 23.45 | 32.36% | 0.756 | 0.0% |
+| *Estacional 24h* (T-24) | 19.49 | 34.62 | 37.25% | 0.467 | −65.6% |
 
-**XGBoost gana en todas las métricas.**
+*Mejora vs persistencia = reducción porcentual del MAE respecto de predecir `CMG(T) = CMG(T-1)`.*
 
-El resultado más relevante es que **XGBoost empata en MAE con la LSTM** (10.18 USD/MWh) y la supera en RMSE y R². Esto no es sorprendente dado el volumen de datos disponible (~30.000 observaciones de entrenamiento): con datasets de este tamaño, un modelo de árboles bien calibrado con feature engineering de calidad es tan competitivo como una red recurrente, y más interpretable. El feature más importante en XGBoost es `gen_solar_mw`, confirmando que el cambio estructural del mercado (expansión solar masiva desde 2023) es la variable dominante en 2024.
+**Cómo leer estos números.** Con horizonte de 1 hora, el CMG es muy autocorrelacionado: la persistencia ya logra R² = 0,76. Por eso la métrica que importa es cuánto mejora cada modelo sobre esa línea base, no el R² absoluto.
 
-El R² negativo de SARIMA (−0.27) no indica un error de implementación: es el resultado esperado de un modelo univariado sin variables exógenas ante un cambio de régimen. SARIMA aprende la estacionalidad de 2021–2023, pero no puede capturar el efecto solar de 2024 porque no tiene acceso a `gen_solar_mw`. Sirve como línea base que cuantifica el valor del feature engineering.
+- **SARIMA es el mejor modelo** (−22,8 % de MAE vs persistencia). Se estima una sola vez sobre train y luego, hora por hora, predice T y actualiza su estado con el CMG real observado (sin re-estimar parámetros). La estructura AR(2)·MA(2) más el componente estacional diario captura muy bien la dinámica de corto plazo.
+- **LSTM** (+15,4 %) y **XGBoost** (+11,8 %) superan a la persistencia, pero no a SARIMA. El LSTM tiene menor MAE que XGBoost, pero mayor RMSE (falla más en los picos). En XGBoost, las features más importantes son `lag_cmg_1h` y `lag_cmg_24h`; la generación por tecnología, que para evitar fuga solo está disponible hasta T-1, aporta poco con horizonte de 1 hora.
+- **Estacional 24h** (`CMG(T) = CMG(T-24)`) es claramente peor que la persistencia: a 1 hora, lo que pasó hace una hora informa más que lo que pasó ayer a la misma hora.
 
-> El MAPE elevado en los tres modelos se debe a horas con CMG ≈ 0 USD/MWh (mediodía solar en verano), donde el error relativo se dispara aunque el error absoluto sea pequeño. En contexto operacional, el MAE absoluto es la métrica más relevante.
+> El MAPE es alto en todos los modelos porque hay horas con CMG ≈ 0 USD/MWh (mediodía solar), donde el error relativo se dispara aunque el error absoluto sea pequeño. El MAE es la métrica más relevante operacionalmente.
+
+### Correcciones metodológicas (v2.0)
+
+Una versión anterior reportaba SARIMA con R² = −0,27 y XGBoost/LSTM con MAE ≈ 10,2. Esos números venían de tres problemas, ya corregidos:
+
+1. **Fuga de información en generación:** XGBoost usaba la generación real de la misma hora T que predecía, un dato que no se conoce al momento de predecir. Ahora todas las columnas `gen_*` están desplazadas 1 hora.
+2. **SARIMA evaluado con otro protocolo:** se hacía un único `forecast()` de ~4.700 pasos que además partía en julio de 2023 (fin del train) y se re-etiquetaba como 2024. Ahora es one-step-ahead con actualización hora por hora, igual que los otros modelos.
+3. **Distinto conjunto de filas por modelo:** el LSTM perdía las primeras 168 horas del test. Ahora todos se evalúan sobre las mismas 4.707 horas, y se agregaron líneas base para dimensionar la mejora real.
 
 ---
 
@@ -88,18 +100,20 @@ El R² negativo de SARIMA (−0.27) no indica un error de implementación: es el
 ┌─────────────────────────────────────────────────────────────────┐
 │              Feature Engineering  (features/)                   │
 │   Lags 1h–168h · Rolling mean/std 24h & 168h                   │
+│   Generación desplazada 1h (solo info hasta T-1)               │
 │   Encoding cíclico hora/dow/mes · Feriados · Join multitabla   │
-│   Output: 30.981 filas × 31 columnas (2021–2024)               │
+│   Output: 30.981 filas × 31 columnas = target + is_imputed     │
+│           + 29 features de modelo (2021–2024)                  │
 └────────────────────────────┬────────────────────────────────────┘
                              │
-             ┌───────────────┼───────────────┐
-             ▼               ▼               ▼
-     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-     │   SARIMA     │ │   XGBoost    │ │     LSTM     │
-     │ MAE = 42.62  │ │ MAE = 10.18  │ │ MAE = 10.18  │
-     │  R² = -0.27  │ │  R² = 0.89   │ │  R² = 0.87   │
-     └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-            └────────────────┼────────────────┘
+            ┌────────────────┼────────────────┬────────────────┐
+            ▼                ▼                ▼                ▼
+     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+     │  Baselines   │ │   SARIMA     │ │   XGBoost    │ │     LSTM     │
+     │ persistencia │ │ MAE =  9.09  │ │ MAE = 10.38  │ │ MAE =  9.95  │
+     │ estacional24 │ │  R² = 0.895  │ │  R² = 0.872  │ │  R² = 0.864  │
+     └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+            └────────────────┼────────────────┴────────────────┘
                              │  predictions (PostgreSQL)
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -141,10 +155,11 @@ CMG_CHILE_PREDICTOR/
 ├── features/
 │   └── build_features.py           # Feature matrix: lags, rolling, cíclico
 ├── models/
-│   ├── sarima.py                   # SARIMA(2,0,2)×(1,1,1,24), grid AIC
+│   ├── baselines.py                # Persistencia (T-1) y estacional (T-24)
+│   ├── sarima.py                   # SARIMA(2,0,2)×(1,1,1,24), grid AIC, paso a paso
 │   ├── xgboost_model.py            # XGBoost con early stopping sobre val
 │   ├── lstm_model.py               # LSTM 2 capas, ventana 168h, MAE loss
-│   ├── evaluate.py                 # Métricas comparativas + graficos + CSV
+│   ├── evaluate.py                 # Métricas sobre filas comunes + mejora vs persistencia
 │   └── saved/
 │       └── reports/
 │           └── metrics_comparison.csv
@@ -177,8 +192,8 @@ CREATE DATABASE cen_data;
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/fernandoureta/CMG_chile_predictor.git
-cd CMG_chile_predictor
+git clone https://github.com/fernandoureta/cmg-chile-predictor.git
+cd cmg-chile-predictor
 ```
 
 ### 2. Crear y activar entorno virtual
@@ -241,12 +256,13 @@ python features/build_features.py
 ### 8. Entrenar los modelos
 
 ```bash
-python models/sarima.py          # ~5 min
-python models/xgboost_model.py   # ~2 min
-python models/lstm_model.py      # ~20 min (GPU recomendada)
+python models/baselines.py       # segundos
+python models/sarima.py          # ~9 min (grid AIC + predicción paso a paso)
+python models/xgboost_model.py   # ~1 min
+python models/lstm_model.py      # ~30-60 min en CPU (GPU recomendada)
 ```
 
-Cada modelo guarda sus predicciones en la tabla `predictions` de PostgreSQL.
+Cada modelo guarda sus predicciones en la tabla `predictions` de PostgreSQL con `model_version = "2.0"` (constante `PREDICTIONS_VERSION` en `config.py`).
 
 ### 9. Evaluación comparativa
 
@@ -254,7 +270,7 @@ Cada modelo guarda sus predicciones en la tabla `predictions` de PostgreSQL.
 python models/evaluate.py
 ```
 
-Genera `models/saved/reports/metrics_comparison.csv` y tres gráficos PNG.
+Restringe todos los modelos a las mismas filas de test y genera `models/saved/reports/metrics_comparison.csv` (incluye la columna `mejora_vs_persistencia_pct`) y tres gráficos PNG.
 
 ### 10. Lanzar el dashboard
 
@@ -285,13 +301,15 @@ Abre el navegador en `http://localhost:8501`.
 
 El período de entrenamiento está limitado por la fuente más restrictiva (generación disponible desde 2021):
 
-| Período | Rol | Filas |
+| Período (límites en UTC) | Rol | Filas |
 |---------|-----|-------|
-| 2021-01-01 → 2023-06-30 | Train | ~21.000 h |
-| 2023-07-01 → 2023-12-31 | Validación | ~4.400 h |
-| 2024-01-01 → 2024-12-31 | Test — solo al final | ~8.760 h |
+| 2021-01-08 → 2023-06-30 23:00 | Train | 21.690 h |
+| 2023-07-01 00:00 → 2023-12-31 23:00 | Validación | 4.416 h |
+| 2024-01-01 00:00 → 2024-07-15 03:00 | Test — solo al final | 4.707 h |
 
-El conjunto de test nunca se toca durante desarrollo ni selección de hiperparámetros. Las features de rolling y lags usan `shift(1)` para garantizar que no haya fuga de información del futuro.
+El train empieza el 8 de enero de 2021 porque el lag de 168 h necesita una semana de historia. El test termina en julio de 2024 porque es el último dato de CMG disponible en la base.
+
+El conjunto de test nunca se toca durante desarrollo ni selección de hiperparámetros. Todas las features usan solo información disponible antes de la hora objetivo: lags y rolling con `shift(1)`, y generación por tecnología desplazada 1 hora.
 
 ### Zona horaria — normalización total a UTC
 
@@ -318,17 +336,29 @@ Toda la base de datos almacena timestamps en UTC. La conversión a zona Santiago
 
 ### Feature engineering
 
-29 variables organizadas en cinco grupos:
+La feature matrix tiene 31 columnas: el target (`cmg_usd_mwh`), el flag `is_imputed` (no se usa como feature) y **29 features de modelo**, organizadas en seis grupos:
 
 | Grupo | Variables |
 |-------|-----------|
 | **Lags del CMG** | lag 1h, 2h, 3h, 6h, 12h, 24h, 168h (1 semana) |
 | **Rolling stats** | mean y std con ventana 24h y 168h (sobre valores con shift=1) |
-| **Generación** | solar, eólica, hidro embalse, hidro pasada, gas, carbón, diésel, total (MW) |
+| **Generación** | solar, eólica, hidro embalse, hidro pasada, gas, carbón, diésel, total (MW) — valor de T-1 |
+| **Embalses** | energía embalsada (GWh, mensual, forward-fill) |
 | **Clima** | temperatura máxima diaria (°C) |
 | **Calendario** | hora sin/cos, día semana sin/cos, mes sin/cos, is_weekend, is_holiday |
 
 El encoding cíclico (sin/cos) preserva la continuidad circular de hora 23→0, lunes→domingo, diciembre→enero, evitando el problema de saltos arbitrarios en encoding ordinal.
+
+---
+
+## Limitaciones
+
+- **Horizonte de 1 hora.** Todos los modelos predicen solo T+1 usando el CMG real hasta T-1. Es un problema más fácil que el pronóstico day-ahead (T+1 a T+24), que es el relevante para muchas decisiones de mercado. El objetivo original de 24 horas está pendiente.
+- **Sin demanda horaria.** La demanda es uno de los principales drivers del CMG y no está en el feature set (ver [Fuentes de datos](#fuentes-de-datos)).
+- **Test de ~6,5 meses.** El test cubre enero–julio 2024 (4.707 horas), no un año completo: no incluye la segunda mitad del año ni un ciclo hidrológico completo, y las métricas podrían cambiar en otra estación.
+- **Una sola barra.** Solo se modela Quillota 220kV.
+- **Granularidad de variables exógenas.** La temperatura es el máximo diario y los embalses son mensuales; se asignan a todas las horas del día/mes, por lo que en la práctica solo serían conocidos completamente al cierre de ese periodo.
+- **SARIMA entrenado sobre 6 meses.** Por costo computacional, sus parámetros se estiman con los últimos 6 meses del train y no se re-estiman durante el test.
 
 ---
 
@@ -338,7 +368,7 @@ El encoding cíclico (sin/cos) preserva la continuidad circular de hora 23→0, 
 - **Temporal Fusion Transformer (TFT)** — modelo de atención diseñado específicamente para series temporales multivariadas con estacionalidades complejas; candidato natural para superar al LSTM en este dataset.
 - **Despliegue en la nube** — containerizar con Docker y desplegar en Google Cloud Run o AWS App Runner con scheduler APScheduler para actualización diaria automática.
 - **Alertas de precio alto** — notificaciones vía email o Telegram cuando la predicción supere el percentil 90 del CMG histórico, útil para grandes consumidores industriales.
-- **Horizonte multi-paso** — extender el modelo de horizon_h=1 a predicciones T+1 → T+24 simultáneas, reemplazando el enfoque recursivo actual.
+- **Horizonte multi-paso** — extender de horizon_h=1 a predicciones T+1 → T+24 (estrategia directa o multi-output), comparando de nuevo contra persistencia y estacional 24h.
 
 ---
 

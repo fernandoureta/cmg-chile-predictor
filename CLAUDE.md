@@ -8,7 +8,8 @@ Proyecto de portafolio GitHub — Ingeniería en Informática.
 
 **Variable objetivo:** costo marginal real, barra Quillota 220kV
 (nombre exacto en BD: "Quillota 220kV"), resolución horaria.
-**Horizonte de predicción:** 24 horas (T+1 a T+24).
+**Horizonte de predicción:** objetivo 24 horas (T+1 a T+24); implementado
+hoy solo T+1 (horizon_h=1). Ver "Limitaciones" en README.
 **Fuente principal:** Coordinador Eléctrico Nacional (coordinador.cl).
 
 ---
@@ -51,20 +52,21 @@ CMG_CHILE_PREDICTOR/
 │   ├── scrapers/
 │   │   ├── cen_marginal.py         ✅ completo y funcionando
 │   │   ├── cen_generation.py       ✅ completo y funcionando
-│   │   ├── cen_demand.py           ⬜ pendiente (ver nota abajo)
+│   │   ├── cen_demand.py           ⬜ pendiente (solo docstring, ver nota abajo)
 │   │   ├── cen_reservoirs.py       ✅ completo y funcionando
 │   │   └── weather.py              ✅ completo y funcionando
 │   ├── transform.py                ✅ completo y funcionando
 │   ├── load.py                     ✅ completo y funcionando
 │   ├── pipeline.py                 ✅ completo y funcionando
-│   └── scheduler.py                ⬜ pendiente
+│   └── scheduler.py                ⬜ pendiente (solo docstring)
 ├── features/
 │   └── build_features.py           ✅ completo y funcionando
 ├── models/
-│   ├── sarima.py                   ✅ entrenado (MAE=42.62, R2=-0.27)
-│   ├── xgboost_model.py            ✅ entrenado (MAE=10.18, R2=0.89)
-│   ├── lstm_model.py               ✅ entrenado (MAE=10.18, R2=0.87)
-│   ├── evaluate.py                 ✅ completo y funcionando
+│   ├── baselines.py                ✅ persistencia (MAE=11.77) y estacional 24h (MAE=19.49)
+│   ├── sarima.py                   ✅ paso a paso (MAE=9.09, R2=0.895)
+│   ├── xgboost_model.py            ✅ re-entrenado sin fuga (MAE=10.38, R2=0.872)
+│   ├── lstm_model.py               ✅ re-entrenado (MAE=9.95, R2=0.864)
+│   ├── evaluate.py                 ✅ filas comunes + mejora vs persistencia
 │   └── saved/
 ├── notebooks/
 │   └── 01_eda.ipynb                ✅ completo
@@ -72,7 +74,7 @@ CMG_CHILE_PREDICTOR/
 │   └── app.py                      ✅ completo y funcionando
 ├── tests/
 │   ├── test_etl.py                 ✅ 6 tests pasando
-│   ├── test_features.py            ✅ 4 tests pasando
+│   ├── test_features.py            ✅ 6 tests pasando
 │   └── test_models.py              ✅ 4 tests pasando
 ├── docs/
 │   └── CMG_Chile_Predictor_Manual.docx
@@ -110,9 +112,25 @@ El período de entrenamiento está limitado por la variable más restrictiva
 
 | Período | Rol |
 |---|---|
-| 2021-01-01 → 2023-06-30 | Train |
-| 2023-07-01 → 2023-12-31 | Validación |
-| 2024-01-01 → 2024-12-31 | Test (tocar solo al final) |
+| 2021-01-01 → 2023-06-30 | Train (21.690 h efectivas, desde 2021-01-08 por el lag 168h) |
+| 2023-07-01 → 2023-12-31 | Validación (4.416 h) |
+| 2024-01-01 00:00 UTC → 2024-07-15 03:00 UTC | Test (4.707 h, tocar solo al final) |
+
+Los límites del split son en **UTC** (`df.loc[...]` sobre índice UTC). El test
+termina en julio 2024 porque es el último dato de CMG en la BD (~6,5 meses,
+no el año completo).
+
+### Reglas anti-fuga y de evaluación (fix/metodologia, 2026-10-15)
+- Toda feature debe ser conocida antes de la hora objetivo T. Lags/rolling
+  del CMG con shift(1); columnas `gen_*` desplazadas 1h (`_shift_generation`).
+- La ventana LSTM termina en T-1 (nunca incluye la fila objetivo).
+- Todos los modelos son one-step-ahead (horizon_h=1) con el CMG real hasta T-1.
+  SARIMA: parámetros fijos, estado actualizado hora a hora con `results.extend()`.
+- Todos los modelos se evalúan sobre las mismas filas (`restrict_to_common_rows`
+  en evaluate.py) y se comparan contra la persistencia.
+- Predicciones con `model_version = PREDICTIONS_VERSION` ("2.0", en config.py).
+  Al cambiar metodología, subir la versión: el upsert es DO NOTHING y no
+  sobrescribe filas existentes.
 
 ### Zona horaria — lección crítica aprendida
 El CEN genera exactamente 24 filas por día sin registrar la hora repetida
@@ -136,7 +154,9 @@ ver la hora duplicada). La solución correcta para TODOS los scrapers es:
   fechas en formato ISO `YYYY-MM-DD`
 
 ### Modelos
-- SARIMA: estacionalidad s=24, selección (p,d,q) por AIC
+- Líneas base: persistencia pred(T)=CMG(T-1) y estacional pred(T)=CMG(T-24)
+- SARIMA: estacionalidad s=24, selección (p,d,q) por AIC → (2,0,2)×(1,1,1,24),
+  estimado sobre los últimos 6 meses del train, evaluado paso a paso
 - XGBoost: 1000 estimadores, early stopping sobre validación
 - LSTM: 2 capas (128→64), Dropout 0.2, BatchNorm, ventana 168h,
   horizonte 24h, optimizer Adam lr=0.001, loss=MAE
@@ -156,7 +176,7 @@ MAE, RMSE, MAPE, R². Precaución: MAPE se infla cuando CMG ≈ 0
 | `demand` | 0 | — | ⬜ pendiente Selenium |
 | `reservoir_levels` | 85 | 2019-01 → 2026-01 | ✅ cargada (pipeline verificado, idempotente) |
 | `weather` | 2.192 | 2019-01 → 2024-12 | ✅ cargada (pipeline verificado, idempotente) |
-| `predictions` | 13.950 | 3 modelos | ✅ cargada (SARIMA + XGBoost + LSTM) |
+| `predictions` | 13.951 (v1.0) + 23.536 (v2.0) | 5 modelos | ✅ v2.0 = 4.707 filas × 5 modelos (+1 hora DST de SARIMA sin actual); v1.0 es histórico obsoleto |
 
 ---
 
@@ -231,13 +251,14 @@ python etl/scrapers/cen_generation.py
 # Construir features (cuando estén todos los datos)
 python features/build_features.py
 
-# Entrenar modelos
-python models/sarima.py --train
-python models/xgboost_model.py --train
-python models/lstm_model.py --train
+# Entrenar modelos (los scripts no usan flags)
+python models/baselines.py
+python models/sarima.py
+python models/xgboost_model.py
+python models/lstm_model.py
 
 # Evaluar
-python models/evaluate.py --report
+python models/evaluate.py
 
 # Dashboard
 streamlit run dashboard/app.py
@@ -247,20 +268,26 @@ streamlit run dashboard/app.py
 
 ## Resultados de modelos
 
-Evaluación sobre conjunto de test (2024-01-01 → 2024-12-31), barra Quillota 220kV, horizon_h=1.
+Evaluación v2.0 sobre el test (2024-01-01 00:00 UTC → 2024-07-15 03:00 UTC,
+4.707 horas, mismas filas para todos), barra Quillota 220kV, horizon_h=1.
 
-| Modelo  | MAE (USD/MWh) | RMSE (USD/MWh) | MAPE    | R²     |
-|---------|---------------|----------------|---------|--------|
-| SARIMA  | 42.62         | 53.52          | 92.13%  | -0.27  |
-| XGBoost | 10.18         | 15.72          | 27.27%  | 0.89   |
-| LSTM    | 10.18         | 17.15          | 27.43%  | 0.87   |
+| Modelo         | MAE   | RMSE  | MAPE   | R²    | Mejora vs persistencia |
+|----------------|-------|-------|--------|-------|------------------------|
+| SARIMA         | 9.09  | 15.35 | 22.69% | 0.895 | +22.8%                 |
+| LSTM           | 9.95  | 17.50 | 29.70% | 0.864 | +15.4%                 |
+| XGBoost        | 10.38 | 16.99 | 28.16% | 0.872 | +11.8%                 |
+| Persistencia   | 11.77 | 23.45 | 32.36% | 0.756 | 0.0%                   |
+| Estacional_24h | 19.49 | 34.62 | 37.25% | 0.467 | −65.6%                 |
 
-**Mejor modelo:** XGBoost en todas las métricas.
+**Mejor modelo:** SARIMA en todas las métricas.
 
 **Interpretación:**
-- SARIMA negativo (R²=-0.27) es el resultado esperado para un modelo sin variables exógenas ante el cambio de régimen de 2024 (expansión solar masiva que deprime precios al mediodía).
-- XGBoost y LSTM con `gen_solar_mw` en el feature set capturan este efecto correctamente.
-- El MAPE elevado en todos los modelos se debe a horas con CMG ≈ 0 (mediodía solar) que inflan el error relativo.
+- Los resultados v1.0 (SARIMA R²=-0.27, XGBoost MAE=10.18) eran inválidos:
+  XGBoost usaba la generación de la hora T (fuga) y SARIMA hacía un forecast
+  de ~4.700 pasos desfasado 6 meses. El "cambio de régimen solar" NO explicaba
+  el R² negativo. Detalle en PROBLEMAS_Y_SOLUCIONES.md (2026-10-15).
+- A 1 hora, la persistencia ya da R²=0.76; reportar siempre la mejora sobre ella.
+- El MAPE elevado se debe a horas con CMG ≈ 0 (mediodía solar).
 
 ---
 
@@ -274,13 +301,15 @@ Evaluación sobre conjunto de test (2024-01-01 → 2024-12-31), barra Quillota 2
 6. ✅ `db/feature_store.sql` — ejecutado
 7. ✅ `features/build_features.py` — lags, rolling, encoding cíclico
 8. ✅ Notebooks EDA (01_eda.ipynb completo)
-9. ✅ SARIMA — MAE=42.62, R2=-0.27 (línea base)
-10. ✅ XGBoost — MAE=10.18, R2=0.89 (mejor modelo)
-11. ✅ LSTM — MAE=10.18, R2=0.87
+9. ✅ SARIMA — paso a paso, MAE=9.09, R2=0.895 (mejor modelo)
+10. ✅ XGBoost — sin fuga, MAE=10.38, R2=0.872
+11. ✅ LSTM — MAE=9.95, R2=0.864
 12. ✅ Evaluación comparativa con reportes (`models/evaluate.py`)
 13. ✅ Dashboard Streamlit — 3 páginas interactivas con Plotly
 14. ✅ README completo con arquitectura, resultados e instrucciones
-15. ✅ Tests — 14 tests (test_etl, test_features, test_models)
+15. ✅ Tests — 16 tests (test_etl, test_features, test_models)
+15b. ✅ fix/metodologia — fuga en generación, SARIMA paso a paso, líneas base,
+    filas comunes, README con limitaciones
 16. ⬜ `cen_demand.py` con Selenium (fase posterior)
 17. ⬜ Despliegue en la nube con Docker
 18. ⬜ Temporal Fusion Transformer
@@ -289,6 +318,8 @@ Evaluación sobre conjunto de test (2024-01-01 → 2024-12-31), barra Quillota 2
 
 ## Estado final del proyecto
 
-**Fecha:** 2026-04-22
+**Fecha:** 2026-10-15 (rama `fix/metodologia`, sin merge a main)
 
-Proyecto completado. 14/14 tests pasando. Dashboard funcional. Tres modelos entrenados y evaluados sobre datos reales del CEN.
+Revisión metodológica completada. 16/16 tests pasando. Tres modelos + dos
+líneas base evaluados sobre las mismas 4.707 horas de test con datos reales
+del CEN. Predicciones vigentes: model_version 2.0.
