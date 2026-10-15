@@ -1,8 +1,12 @@
 """Evaluacion comparativa de modelos CMG Chile Predictor.
 
 Carga predicciones desde la tabla predictions de PostgreSQL,
-calcula metricas (MAE, RMSE, MAPE, R2) por modelo y genera
-graficos comparativos y reporte CSV.
+calcula metricas (MAE, RMSE, MAPE, R2 y mejora vs persistencia) por
+modelo y genera graficos comparativos y reporte CSV.
+
+Todos los modelos se evaluan sobre el mismo conjunto de filas: la
+interseccion de timestamps con prediccion de todos los modelos presentes.
+Solo se leen predicciones de la version PREDICTIONS_VERSION (config.py).
 """
 
 import logging
@@ -22,15 +26,16 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from config import DB_URL  # noqa: E402
+from config import DB_URL, PREDICTIONS_VERSION  # noqa: E402
 
 # ── Logger ────────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 BARRA: str = "Quillota 220kV"
-MODELOS: list[str] = ["SARIMA", "XGBoost", "LSTM"]
-SAVED_DIR: Path = Path("models/saved")
+MODELOS: list[str] = ["Persistencia", "Estacional_24h", "SARIMA", "XGBoost", "LSTM"]
+BASELINE_REF: str = "Persistencia"
+SAVED_DIR: Path = _ROOT / "models" / "saved"
 REPORTS_DIR: Path = SAVED_DIR / "reports"
 
 
@@ -41,8 +46,9 @@ REPORTS_DIR: Path = SAVED_DIR / "reports"
 def load_predictions(engine: Engine) -> pd.DataFrame:
     """Cargar predicciones desde la tabla predictions de PostgreSQL.
 
-    Filtra por barra Quillota 220kV, horizon_h=1 y actual_cmg NOT NULL.
-    Convierte datetime a zona America/Santiago para analisis por hora.
+    Filtra por barra Quillota 220kV, horizon_h=1, actual_cmg NOT NULL y
+    model_version = PREDICTIONS_VERSION. Convierte datetime a zona
+    America/Santiago para analisis por hora.
 
     Args:
         engine: Engine de SQLAlchemy conectado a cen_data.
@@ -62,11 +68,14 @@ def load_predictions(engine: Engine) -> pd.DataFrame:
         WHERE barra        = :barra
           AND horizon_h    = 1
           AND actual_cmg   IS NOT NULL
+          AND model_version = :version
         ORDER BY model_name, datetime
     """)
 
     with engine.connect() as conn:
-        df = pd.read_sql(sql, conn, params={"barra": BARRA})
+        df = pd.read_sql(
+            sql, conn, params={"barra": BARRA, "version": PREDICTIONS_VERSION}
+        )
 
     if df.empty:
         logger.warning("No hay predicciones en la tabla 'predictions' para %s.", BARRA)
@@ -87,6 +96,36 @@ def load_predictions(engine: Engine) -> pd.DataFrame:
     return df
 
 
+def restrict_to_common_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Quedarse solo con los timestamps que tienen prediccion de todos los modelos.
+
+    Garantiza que las metricas de cada modelo se calculen sobre exactamente
+    las mismas filas de test, de modo que la comparacion sea justa.
+
+    Args:
+        df: DataFrame producido por load_predictions().
+
+    Returns:
+        DataFrame filtrado a la interseccion de datetimes entre modelos.
+    """
+    if df.empty:
+        return df
+
+    n_modelos = df["model_name"].nunique()
+    cuenta = df.groupby("datetime")["model_name"].nunique()
+    comunes = cuenta.index[cuenta == n_modelos]
+
+    por_modelo = df.groupby("model_name").size().to_dict()
+    df_comun = df[df["datetime"].isin(comunes)].copy()
+    logger.info(
+        "Filas comunes a los %d modelos: %d (por modelo antes del filtro: %s)",
+        n_modelos,
+        len(comunes),
+        por_modelo,
+    )
+    return df_comun
+
+
 # =============================================================================
 # METRICAS
 # =============================================================================
@@ -97,12 +136,18 @@ def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
     MAPE excluye registros donde actual_cmg == 0 para evitar
     division por cero (mediodias solares). Ordena por MAE ascendente.
 
+    La columna mejora_vs_persistencia_pct es la reduccion porcentual de MAE
+    respecto de la linea base de persistencia:
+    (MAE_persistencia - MAE_modelo) / MAE_persistencia * 100.
+    Positivo = mejor que persistencia.
+
     Args:
         df: DataFrame producido por load_predictions().
 
     Returns:
         DataFrame con columnas: model_name, mae, rmse, mape, r2,
-        n_predictions; una fila por modelo, ordenado por mae.
+        mejora_vs_persistencia_pct, n_predictions; una fila por modelo,
+        ordenado por mae.
     """
     if df.empty:
         logger.warning("DataFrame vacio — no se pueden calcular metricas.")
@@ -141,8 +186,22 @@ def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
             "n_predictions": int(mask.sum()),
         })
 
+    metrics_df = pd.DataFrame(rows)
+
+    ref = metrics_df.loc[metrics_df["model_name"] == BASELINE_REF, "mae"]
+    if len(ref):
+        mae_ref = float(ref.iloc[0])
+        metrics_df["mejora_vs_persistencia_pct"] = (
+            (mae_ref - metrics_df["mae"]) / mae_ref * 100
+        )
+    else:
+        logger.warning("Sin predicciones de %s: no se calcula la mejora.", BASELINE_REF)
+        metrics_df["mejora_vs_persistencia_pct"] = np.nan
+
+    cols = ["model_name", "mae", "rmse", "mape", "r2",
+            "mejora_vs_persistencia_pct", "n_predictions"]
     metrics_df = (
-        pd.DataFrame(rows)
+        metrics_df[cols]
         .sort_values("mae")
         .reset_index(drop=True)
     )
@@ -222,7 +281,7 @@ def plot_error_distribution(df: pd.DataFrame, output_dir: Path) -> None:
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, n, figsize=(7 * n, 5), sharey=False)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4.5), sharey=False)
     if n == 1:
         axes = [axes]
 
@@ -277,7 +336,7 @@ def plot_error_by_hour(df: pd.DataFrame, output_dir: Path) -> None:
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, n, figsize=(7 * n, 5), sharey=False)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4.5), sharey=False)
     if n == 1:
         axes = [axes]
 
@@ -331,21 +390,25 @@ def generate_report(metrics_df: pd.DataFrame, output_dir: Path) -> None:
     logger.info("Reporte CSV guardado: %s", ruta_csv)
 
     # Tabla formateada en log
-    sep = "=" * 75
+    sep = "=" * 90
     logger.info(sep)
     logger.info("COMPARACION DE MODELOS — CMG Quillota 220kV")
     logger.info(sep)
-    header = f"{'Modelo':<12} {'MAE':>10} {'RMSE':>10} {'MAPE':>10} {'R2':>8} {'N':>8}"
+    header = (
+        f"{'Modelo':<15} {'MAE':>10} {'RMSE':>10} {'MAPE':>10} {'R2':>8} "
+        f"{'vs pers.':>10} {'N':>8}"
+    )
     logger.info(header)
-    logger.info("-" * 75)
+    logger.info("-" * 90)
     for _, row in metrics_df.iterrows():
         logger.info(
-            "%-12s %10.4f %10.4f %9.2f%% %8.4f %8d",
+            "%-15s %10.4f %10.4f %9.2f%% %8.4f %9.2f%% %8d",
             row["model_name"],
             row["mae"],
             row["rmse"],
             row["mape"],
             row["r2"],
+            row["mejora_vs_persistencia_pct"],
             int(row["n_predictions"]),
         )
     logger.info(sep)
@@ -387,9 +450,13 @@ if __name__ == "__main__":
         if df.empty:
             logger.error(
                 "No hay predicciones disponibles. "
-                "Ejecuta primero sarima.py, xgboost_model.py y lstm_model.py."
+                "Ejecuta primero baselines.py, sarima.py, xgboost_model.py "
+                "y lstm_model.py."
             )
             sys.exit(1)
+
+        # ── Mismas filas para todos los modelos ────────────────────────────────
+        df = restrict_to_common_rows(df)
 
         # ── Metricas ───────────────────────────────────────────────────────────
         metrics_df = compute_metrics(df)

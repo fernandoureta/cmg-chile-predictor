@@ -1,8 +1,9 @@
 """Modelo XGBoost con feature engineering completo para prediccion CMG.
 
-Usa la feature matrix de 29 columnas construida por build_features.py:
+Usa 29 features de la matriz construida por build_features.py:
 lags del target, rolling stats, encoding ciclico, calendario, generacion
-por tecnologia, nivel de embalses y temperatura.
+por tecnologia (desplazada 1h, solo informacion hasta T-1), nivel de
+embalses y temperatura.
 
 Early stopping sobre el conjunto de validacion (2023-07-01 a 2023-12-31)
 con eval_metric=mae y patience=50 estimadores.
@@ -27,7 +28,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from config import DB_URL                               # noqa: E402
+from config import DB_URL, PREDICTIONS_VERSION            # noqa: E402
 from features.build_features import build_feature_matrix  # noqa: E402
 
 # ── Logger ────────────────────────────────────────────────────────────────────
@@ -91,7 +92,8 @@ def load_feature_matrix(engine: Engine) -> pd.DataFrame:
         engine: Engine de SQLAlchemy conectado a cen_data.
 
     Returns:
-        DataFrame con indice DatetimeIndex UTC y 31 columnas de features.
+        DataFrame con indice DatetimeIndex UTC: target, is_imputed y las
+        29 features de FEATURE_COLS (31 columnas).
     """
     logger.info("Construyendo feature matrix desde PostgreSQL...")
     t0 = time.perf_counter()
@@ -348,7 +350,8 @@ def save_results(
 ) -> None:
     """Guardar predicciones en la tabla predictions de PostgreSQL.
 
-    Inserta con model_name='XGBoost', model_version='1.0', horizon_h=1.
+    Inserta con model_name='XGBoost', model_version=PREDICTIONS_VERSION,
+    horizon_h=1.
     Usa ON CONFLICT DO NOTHING para idempotencia.
 
     Args:
@@ -365,7 +368,7 @@ def save_results(
             "datetime":      ts,
             "barra":         BARRA,
             "model_name":    "XGBoost",
-            "model_version": "1.0",
+            "model_version": PREDICTIONS_VERSION,
             "predicted_cmg": float(pred),
             "actual_cmg":    float(actual) if pd.notna(actual) else None,
             "horizon_h":     1,

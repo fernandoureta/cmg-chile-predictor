@@ -4,6 +4,14 @@ Entrena un modelo SARIMAX sobre los ultimos 6 meses del conjunto de
 train para eficiencia computacional. Evalua sobre el conjunto de test
 (2024) y guarda las predicciones en la tabla predictions de PostgreSQL.
 
+Evaluacion paso a paso (one-step-ahead): los parametros se estiman una
+sola vez sobre train y luego, hora por hora, se predice T y se incorpora
+la observacion real de T al estado del filtro con results.extend()
+(sin re-estimar parametros, equivalente a refit=False). Asi SARIMA se
+compara en igualdad de condiciones con XGBoost/LSTM, que tambien ven el
+CMG real hasta T-1. Antes del test, el estado se actualiza con todo el
+periodo de validacion (jul-dic 2023) para no arrastrar un hueco de 6 meses.
+
 Estacionalidad: diaria (s=24), captura el patron intradiario tipico
 del CMG que cae al mediodia (generacion solar) y sube en punta vespertina.
 
@@ -29,7 +37,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from config import DB_URL  # noqa: E402
+from config import DB_URL, PREDICTIONS_VERSION  # noqa: E402
 
 # ── Logger ────────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -37,7 +45,9 @@ logger = logging.getLogger(__name__)
 # ── Constantes ────────────────────────────────────────────────────────────────
 BARRA: str = "Quillota 220kV"
 TRAIN_END: str = "2023-06-30"
-TEST_START: str = "2024-01-01"
+# Limite en UTC, igual que el split de features/build_features.py, para que
+# SARIMA se evalue sobre exactamente las mismas filas que los demas modelos.
+TEST_START_UTC: pd.Timestamp = pd.Timestamp("2024-01-01", tz="UTC")
 SAMPLE_MONTHS: int = 6
 SEASONAL_PERIOD: int = 24
 
@@ -116,34 +126,34 @@ def load_train_series(engine: Engine) -> pd.Series:
     return serie
 
 
-def load_test_series(engine: Engine) -> pd.Series:
-    """Cargar la serie de test desde PostgreSQL.
+def load_post_train_series(engine: Engine, after: pd.Timestamp) -> pd.Series:
+    """Cargar la serie posterior al train (validacion + test) desde PostgreSQL.
 
-    Consulta marginal_costs para la barra Quillota desde TEST_START
-    en adelante (2024-01-01 → fin de datos).
+    Retorna todas las horas estrictamente posteriores a `after` (el ultimo
+    timestamp de la serie de train), de modo que la serie sea contigua con
+    el train y results.extend() pueda continuar el filtro sin huecos.
 
     Args:
         engine: Engine de SQLAlchemy conectado a cen_data.
+        after: Ultimo timestamp (UTC) de la serie de train.
 
     Returns:
         Serie con indice DatetimeIndex UTC, frecuencia horaria ('h'),
-        nombre 'cmg_usd_mwh'.
+        nombre 'cmg_usd_mwh'. Las horas faltantes quedan como NaN
+        (SARIMAX las trata como observaciones perdidas).
     """
     sql = text("""
         SELECT datetime, cmg_usd_mwh
         FROM marginal_costs
         WHERE barra = :barra
-          AND datetime >= :test_start
+          AND datetime > :after
         ORDER BY datetime ASC
     """)
     with engine.connect() as conn:
         df = pd.read_sql(
             sql,
             conn,
-            params={
-                "barra": BARRA,
-                "test_start": TEST_START,
-            },
+            params={"barra": BARRA, "after": after.to_pydatetime()},
         )
 
     df["datetime"] = _to_utc(df["datetime"])
@@ -151,7 +161,7 @@ def load_test_series(engine: Engine) -> pd.Series:
     serie = serie.asfreq("h")
 
     logger.info(
-        "Serie de test cargada: %d filas (%s → %s)",
+        "Serie post-train cargada: %d filas (%s → %s)",
         len(serie),
         serie.index.min(),
         serie.index.max(),
@@ -304,20 +314,68 @@ def train_sarima(
 # EVALUACION
 # =============================================================================
 
-def evaluate_sarima(
+def predict_one_step(
     model_result: SARIMAXResults,
+    post_train_series: pd.Series,
+) -> pd.Series:
+    """Prediccion a un paso con actualizacion hora por hora.
+
+    Primero incorpora todo el periodo de validacion al estado del filtro
+    (sin generar predicciones). Luego, para cada hora T del test:
+      1. pred(T) = forecast(1) con el estado actualizado hasta T-1.
+      2. Se incorpora el CMG real de T con results.extend() (los parametros
+         quedan fijos, no se re-estima: equivalente a refit=False).
+
+    Args:
+        model_result: Resultado del entrenamiento SARIMAX sobre train.
+        post_train_series: Serie horaria contigua al train (val + test).
+
+    Returns:
+        Serie de predicciones one-step-ahead indexada por las horas de test
+        (>= TEST_START_UTC).
+    """
+    warmup = post_train_series.loc[: TEST_START_UTC - pd.Timedelta(hours=1)]
+    test   = post_train_series.loc[TEST_START_UTC:]
+
+    t0 = time.perf_counter()
+    res = model_result
+    if len(warmup):
+        res = res.extend(warmup.values)
+    logger.info(
+        "Estado actualizado con %d horas de validacion (%.1fs)",
+        len(warmup),
+        time.perf_counter() - t0,
+    )
+
+    logger.info("Prediccion paso a paso sobre %d horas de test...", len(test))
+    t0 = time.perf_counter()
+    preds = np.empty(len(test), dtype=float)
+    y = test.values
+    for i in range(len(test)):
+        preds[i] = float(np.asarray(res.forecast(steps=1))[0])
+        res = res.extend(y[i : i + 1])
+        if (i + 1) % 1000 == 0:
+            logger.info(
+                "  %d/%d horas (%.1fs)", i + 1, len(test), time.perf_counter() - t0
+            )
+
+    logger.info("Prediccion paso a paso completada en %.1fs", time.perf_counter() - t0)
+    return pd.Series(preds, index=test.index, name="cmg_predicted")
+
+
+def evaluate_sarima(
+    predictions: pd.Series,
     test_series: pd.Series,
 ) -> dict:
-    """Generar predicciones y calcular metricas sobre el conjunto de test.
+    """Calcular metricas de las predicciones paso a paso sobre el test.
 
-    Usa forecast() con steps=len(test_series) para prediccion out-of-sample.
     Las metricas calculadas son: MAE, RMSE, MAPE, R2.
     MAPE ignora los timesteps donde el valor real es cero para evitar
     division por cero (ocurre al mediodia cuando el CMG cae a 0 por solar).
 
     Args:
-        model_result: Resultado del entrenamiento SARIMAX.
-        test_series: Serie real del conjunto de test.
+        predictions: Serie producida por predict_one_step().
+        test_series: Serie real del conjunto de test, mismo indice.
 
     Returns:
         Diccionario con claves:
@@ -325,21 +383,10 @@ def evaluate_sarima(
         - 'rmse': float
         - 'mape': float (porcentaje, 0-100)
         - 'r2': float
-        - 'predictions': pd.Series con las predicciones alineadas al indice
-          de test_series
+        - 'predictions': pd.Series con las predicciones
     """
-    logger.info("Generando forecast para %d pasos...", len(test_series))
-    t0 = time.perf_counter()
-
-    forecast = model_result.forecast(steps=len(test_series))
-    forecast.index = test_series.index
-    forecast.name = "cmg_predicted"
-
-    dt = time.perf_counter() - t0
-    logger.info("Forecast generado en %.1fs", dt)
-
-    y_true = test_series.values
-    y_pred = forecast.values
+    y_true = test_series.reindex(predictions.index).values
+    y_pred = predictions.values
 
     # Alinear sobre indices donde ambos son finitos
     mask_validos = np.isfinite(y_true) & np.isfinite(y_pred)
@@ -361,7 +408,7 @@ def evaluate_sarima(
         "rmse": rmse,
         "mape": mape,
         "r2":   r2,
-        "predictions": forecast,
+        "predictions": predictions,
     }
 
     logger.info("Metricas sobre test:")
@@ -384,8 +431,8 @@ def save_results(
     """Guardar predicciones en la tabla predictions de PostgreSQL.
 
     Inserta cada prediccion con model_name='SARIMA', horizon_h=1 (prediccion
-    de un paso hacia adelante en modo forecast out-of-sample), usando
-    ON CONFLICT DO NOTHING para idempotencia.
+    a un paso con actualizacion del estado hora por hora),
+    model_version=PREDICTIONS_VERSION, usando ON CONFLICT DO NOTHING.
 
     Args:
         metrics: Diccionario producido por evaluate_sarima(), que incluye
@@ -400,7 +447,7 @@ def save_results(
             "datetime":      ts,
             "barra":         BARRA,
             "model_name":    "SARIMA",
-            "model_version": "1.0",
+            "model_version": PREDICTIONS_VERSION,
             "predicted_cmg": float(pred),
             "actual_cmg":    float(actual) if pd.notna(actual) else None,
             "horizon_h":     1,
@@ -469,11 +516,13 @@ if __name__ == "__main__":
         # ── Carga de datos ─────────────────────────────────────────────────────
         logger.info("Cargando series desde PostgreSQL...")
         train_series = load_train_series(engine)
-        test_series  = load_test_series(engine)
+        post_series  = load_post_train_series(engine, train_series.index.max())
+        test_series  = post_series.loc[TEST_START_UTC:]
 
         logger.info(
-            "Train: %d obs  |  Test: %d obs",
+            "Train: %d obs  |  Val (warm-up): %d obs  |  Test: %d obs",
             len(train_series),
+            len(post_series) - len(test_series),
             len(test_series),
         )
 
@@ -498,7 +547,8 @@ if __name__ == "__main__":
         model_result = train_sarima(train_series, order, seasonal_order)
 
         # ── Evaluacion ────────────────────────────────────────────────────────
-        metrics = evaluate_sarima(model_result, test_series)
+        predictions = predict_one_step(model_result, post_series)
+        metrics = evaluate_sarima(predictions, test_series)
 
         # ── Guardado ──────────────────────────────────────────────────────────
         save_results(metrics, test_series, engine)

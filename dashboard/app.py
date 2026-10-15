@@ -21,22 +21,27 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from config import DB_URL  # noqa: E402
+from config import DB_URL, PREDICTIONS_VERSION         # noqa: E402
+from models.evaluate import restrict_to_common_rows    # noqa: E402
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 BARRA: str = "Quillota 220kV"
-MODELOS: list[str] = ["SARIMA", "XGBoost", "LSTM"]
+MODELOS: list[str] = ["Persistencia", "Estacional_24h", "SARIMA", "XGBoost", "LSTM"]
 
 COLOR_REAL:    str = "#111111"
+COLOR_PERSIST: str = "#2ca02c"
+COLOR_ESTAC:   str = "#9467bd"
 COLOR_SARIMA:  str = "#888888"
 COLOR_XGBOOST: str = "#1f77b4"
 COLOR_LSTM:    str = "#ff7f0e"
 
 COLOR_MODELO: dict[str, str] = {
-    "Real":    COLOR_REAL,
-    "SARIMA":  COLOR_SARIMA,
-    "XGBoost": COLOR_XGBOOST,
-    "LSTM":    COLOR_LSTM,
+    "Real":           COLOR_REAL,
+    "Persistencia":   COLOR_PERSIST,
+    "Estacional_24h": COLOR_ESTAC,
+    "SARIMA":         COLOR_SARIMA,
+    "XGBoost":        COLOR_XGBOOST,
+    "LSTM":           COLOR_LSTM,
 }
 
 # ── Engine (singleton por sesion) ─────────────────────────────────────────────
@@ -81,7 +86,10 @@ def load_cmg() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def load_predictions_dash() -> pd.DataFrame:
-    """Cargar predicciones de los tres modelos desde tabla predictions.
+    """Cargar predicciones (modelos + lineas base) desde tabla predictions.
+
+    Solo lee model_version = PREDICTIONS_VERSION y restringe a las filas
+    con prediccion de todos los modelos (mismo conjunto de test).
 
     Returns:
         DataFrame con columnas datetime (UTC), model_name, predicted_cmg,
@@ -93,18 +101,21 @@ def load_predictions_dash() -> pd.DataFrame:
         WHERE barra      = :barra
           AND horizon_h  = 1
           AND actual_cmg IS NOT NULL
+          AND model_version = :version
         ORDER BY model_name, datetime
     """)
     engine = get_engine()
     with engine.connect() as conn:
-        df = pd.read_sql(sql, conn, params={"barra": BARRA})
+        df = pd.read_sql(
+            sql, conn, params={"barra": BARRA, "version": PREDICTIONS_VERSION}
+        )
 
     if df.empty:
         return df
 
     df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
     df["hora_santiago"] = df["datetime"].dt.tz_convert("America/Santiago").dt.hour
-    return df
+    return restrict_to_common_rows(df)
 
 
 @st.cache_data(ttl=3600)
@@ -137,7 +148,7 @@ def load_generation() -> pd.DataFrame:
 # =============================================================================
 
 def _compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    """Calcular MAE, RMSE, MAPE, R2 por modelo sobre df de predicciones."""
+    """Calcular MAE, RMSE, MAPE, R2 y mejora vs persistencia por modelo."""
     rows: list[dict] = []
     for model_name, grp in df.groupby("model_name"):
         yt = grp["actual_cmg"].values.astype(float)
@@ -162,7 +173,13 @@ def _compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
             "R²": round(r2, 4),
             "N predicciones": int(mask.sum()),
         })
-    return pd.DataFrame(rows).sort_values("MAE (USD/MWh)").reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    ref = out.loc[out["Modelo"] == "Persistencia", "MAE (USD/MWh)"]
+    out["Mejora vs persistencia (%)"] = (
+        ((ref.iloc[0] - out["MAE (USD/MWh)"]) / ref.iloc[0] * 100).round(2)
+        if len(ref) else np.nan
+    )
+    return out.sort_values("MAE (USD/MWh)").reset_index(drop=True)
 
 
 # =============================================================================
@@ -313,15 +330,19 @@ if pagina == "Historico CMG":
 
 elif pagina == "Predicciones y modelos":
     st.title("Comparacion de Modelos Predictivos")
-    st.caption("Conjunto de test: 2024-01-01 → 2024-12-31 | horizon_h=1")
+    st.caption(
+        "Conjunto de test: 2024-01-01 00:00 UTC → 2024-07-15 03:00 UTC "
+        "(≈ 6,5 meses, 4.707 horas) | horizon_h=1 | mismas filas para todos los modelos"
+    )
 
     df_pred = load_predictions_dash()
 
     if df_pred.empty:
         st.warning(
             "No hay predicciones en la tabla `predictions`. "
-            "Ejecuta primero los modelos: `python models/sarima.py`, "
-            "`python models/xgboost_model.py`, `python models/lstm_model.py`."
+            "Ejecuta primero los modelos: `python models/baselines.py`, "
+            "`python models/sarima.py`, `python models/xgboost_model.py`, "
+            "`python models/lstm_model.py`."
         )
         st.stop()
 
@@ -343,6 +364,7 @@ elif pagina == "Predicciones y modelos":
             "RMSE (USD/MWh)": "{:.2f}",
             "MAPE (%)": "{:.2f}%",
             "R²": "{:.4f}",
+            "Mejora vs persistencia (%)": "{:+.2f}%",
         }),
         use_container_width=True,
         hide_index=True,

@@ -23,8 +23,10 @@ _LSTM_PATH    = _SAVED_DIR / "lstm_best.keras"
 _METRICS_CSV  = _REPORTS_DIR / "metrics_comparison.csv"
 
 _EXPECTED_FEATURE_COUNT = 29
-_EXPECTED_METRIC_COLS   = {"model_name", "mae", "rmse", "mape", "r2"}
-_EXPECTED_MODEL_COUNT   = 3
+_EXPECTED_METRIC_COLS   = {
+    "model_name", "mae", "rmse", "mape", "r2", "mejora_vs_persistencia_pct", "n_predictions",
+}
+_EXPECTED_MODELS        = {"Persistencia", "Estacional_24h", "SARIMA", "XGBoost", "LSTM"}
 _MAE_THRESHOLD_XGBOOST  = 15.0
 
 
@@ -89,14 +91,16 @@ def test_lstm_modelo_guardado_existe() -> None:
 
 
 # =============================================================================
-# TEST 4 — CSV de métricas existe, tiene estructura correcta y XGBoost < 15
+# TEST 4 — CSV de métricas: estructura, mismas filas y XGBoost > persistencia
 # =============================================================================
 
 def test_metricas_csv_existe() -> None:
     """Verifica que el CSV comparativo de métricas existe y tiene contenido válido.
 
-    Comprueba: existencia del archivo, columnas requeridas, exactamente
-    3 filas (una por modelo) y que XGBoost tiene MAE < 15 USD/MWh.
+    Comprueba: existencia del archivo, columnas requeridas, una fila por
+    modelo (3 modelos + 2 líneas base), que todos se evaluaron sobre el mismo
+    número de filas, que XGBoost tiene MAE < 15 USD/MWh y que supera a la
+    línea base de persistencia.
     """
     assert _METRICS_CSV.exists(), (
         f"CSV de métricas no encontrado en {_METRICS_CSV}. "
@@ -110,9 +114,13 @@ def test_metricas_csv_existe() -> None:
         f"Columnas faltantes en metrics_comparison.csv: {cols_faltantes}"
     )
 
-    assert len(df) == _EXPECTED_MODEL_COUNT, (
-        f"Se esperaban {_EXPECTED_MODEL_COUNT} filas (SARIMA, XGBoost, LSTM), "
-        f"obtenidas {len(df)}"
+    assert set(df["model_name"]) == _EXPECTED_MODELS, (
+        f"Se esperaban los modelos {_EXPECTED_MODELS}, obtenidos {set(df['model_name'])}"
+    )
+
+    assert df["n_predictions"].nunique() == 1, (
+        "Todos los modelos deben evaluarse sobre las mismas filas: "
+        f"{dict(zip(df['model_name'], df['n_predictions']))}"
     )
 
     xgb_row = df[df["model_name"] == "XGBoost"]
@@ -121,4 +129,9 @@ def test_metricas_csv_existe() -> None:
     mae_xgb = float(xgb_row["mae"].iloc[0])
     assert mae_xgb < _MAE_THRESHOLD_XGBOOST, (
         f"MAE de XGBoost ({mae_xgb:.2f}) supera el umbral de {_MAE_THRESHOLD_XGBOOST} USD/MWh"
+    )
+
+    mejora_xgb = float(xgb_row["mejora_vs_persistencia_pct"].iloc[0])
+    assert mejora_xgb > 0, (
+        f"XGBoost no supera a la persistencia (mejora = {mejora_xgb:.2f}%)"
     )

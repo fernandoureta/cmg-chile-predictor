@@ -47,6 +47,12 @@ DB_URL: str = (
     f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
+# ── Version de predicciones ───────────────────────────────────────────────────
+# 2.0: generacion desplazada 1h (sin fuga), SARIMA paso a paso, lineas base y
+# test comun a todos los modelos. Las filas 1.0 quedan en la BD como historico
+# pero evaluate.py y el dashboard solo leen esta version.
+PREDICTIONS_VERSION: str = "2.0"
+
 # ── Variables opcionales de APIs externas ─────────────────────────────────────
 CEN_API_KEY: str = os.getenv("CEN_API_KEY", "")
 

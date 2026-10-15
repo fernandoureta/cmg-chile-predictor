@@ -37,7 +37,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from config import DB_URL                                  # noqa: E402
+from config import DB_URL, PREDICTIONS_VERSION            # noqa: E402
 from features.build_features import build_feature_matrix   # noqa: E402
 
 # ── Logger ────────────────────────────────────────────────────────────────────
@@ -191,6 +191,11 @@ def create_sequences(
     [t, t+window_size) y un target con el valor de la columna TARGET_COL_IDX
     en el instante t+window_size (el siguiente paso fuera de la ventana).
 
+    La fila objetivo nunca entra a la ventana: la ultima fila usada es
+    T-1, y como las columnas gen_* ya vienen desplazadas 1h, la generacion
+    mas reciente que ve el modelo es la de T-2. Ningun dato de la hora
+    objetivo T llega al input.
+
     Args:
         data: Array de shape (n_timesteps, n_features) escalado.
         window_size: Numero de pasos de tiempo en cada secuencia.
@@ -234,7 +239,8 @@ def build_lstm_model(n_features: int) -> keras.Model:
     Compilado con Adam(lr=0.001), loss='mae', metrics=['mse'].
 
     Args:
-        n_features: Numero de features por timestep (30 en este proyecto).
+        n_features: Numero de columnas por timestep (30 = target + 29
+            features).
 
     Returns:
         Modelo Keras compilado listo para entrenar.
@@ -376,7 +382,7 @@ def evaluate_lstm(
         X_test: Secuencias de test, shape (n, WINDOW_SIZE, n_features).
         y_test_raw: Targets de test en escala normalizada, shape (n,).
         scaler: MinMaxScaler ajustado sobre el train.
-        n_features: Numero total de features (30).
+        n_features: Numero total de columnas escaladas (30).
         test_index: DatetimeIndex del conjunto de test, alineado con y_test_raw.
 
     Returns:
@@ -442,7 +448,8 @@ def save_results(
 ) -> None:
     """Guardar predicciones LSTM en la tabla predictions de PostgreSQL.
 
-    Inserta con model_name='LSTM', model_version='1.0', horizon_h=1.
+    Inserta con model_name='LSTM', model_version=PREDICTIONS_VERSION,
+    horizon_h=1.
     Usa ON CONFLICT DO NOTHING para idempotencia.
 
     Args:
@@ -458,7 +465,7 @@ def save_results(
             "datetime":      ts,
             "barra":         BARRA,
             "model_name":    "LSTM",
-            "model_version": "1.0",
+            "model_version": PREDICTIONS_VERSION,
             "predicted_cmg": float(pred),
             "actual_cmg":    float(actual) if np.isfinite(actual) else None,
             "horizon_h":     1,
@@ -523,12 +530,16 @@ def _log_comparison(engine: Engine, lstm_metrics: dict) -> None:
         WHERE actual_cmg IS NOT NULL
           AND barra = :barra
           AND horizon_h = 1
+          AND model_version = :version
         GROUP BY model_name
         ORDER BY mae ASC
     """)
     try:
         with engine.connect() as conn:
-            df_comp = pd.read_sql(sql, conn, params={"barra": BARRA})
+            df_comp = pd.read_sql(
+                sql, conn,
+                params={"barra": BARRA, "version": PREDICTIONS_VERSION},
+            )
 
         if df_comp.empty:
             return
@@ -578,17 +589,21 @@ if __name__ == "__main__":
         logger.info("Creando secuencias (window=%d)...", WINDOW_SIZE)
         X_train, y_train = create_sequences(train_scaled, WINDOW_SIZE)
         X_val,   y_val   = create_sequences(val_scaled,   WINDOW_SIZE)
-        X_test,  y_test  = create_sequences(test_scaled,  WINDOW_SIZE)
+        # Test: se antepone la cola de validacion como contexto para que
+        # haya una prediccion por CADA fila de test (antes se perdian las
+        # primeras WINDOW_SIZE horas y el LSTM se evaluaba sobre menos filas
+        # que el resto de modelos).
+        test_ctx = np.concatenate([val_scaled[-WINDOW_SIZE:], test_scaled])
+        X_test,  y_test  = create_sequences(test_ctx, WINDOW_SIZE)
 
         logger.info(
             "Secuencias | X_train=%s  X_val=%s  X_test=%s",
             X_train.shape, X_val.shape, X_test.shape,
         )
 
-        # Indice datetime del test alineado con las secuencias
-        # create_sequences produce n-window_size samples; el primero
-        # corresponde al instante window_size del DataFrame original.
-        test_index = df_test.index[WINDOW_SIZE:]
+        # Con el contexto de validacion, la secuencia i predice la fila i
+        # de df_test: una prediccion por fila de test.
+        test_index = df_test.index
 
         # ── 4. Arquitectura ────────────────────────────────────────────────────
         model = build_lstm_model(n_features)
