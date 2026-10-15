@@ -1,6 +1,8 @@
 """Tests para el módulo de feature engineering.
 
-Verifica encoding cíclico, lags y rolling stats sin tocar PostgreSQL.
+Verifica encoding cíclico, lags, rolling stats, el desplazamiento de la
+generación (sin fuga de la hora objetivo) y la ventana del LSTM, sin tocar
+PostgreSQL.
 Todas las funciones bajo test son helpers privados de build_features.py,
 invocados directamente para testear la lógica matemática.
 """
@@ -18,9 +20,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from features.build_features import (
+    _COLS_GEN,
     _add_cyclic_encoding,
     _add_lag_features,
     _add_rolling_features,
+    _shift_generation,
 )
 
 
@@ -129,3 +133,60 @@ def test_rolling_no_leakage() -> None:
         f"rolling_mean_24h en T no debe incluir T: "
         f"obtenido {rolling_last:.2f}, esperado ~100.0"
     )
+
+
+# =============================================================================
+# TEST 5 — Generación sin fuga: gen_solar_mw[T] == generación real de T-1
+# =============================================================================
+
+def test_generacion_shift_sin_fuga() -> None:
+    """Verifica que tras el shift la fila T contiene la generación real de T-1.
+
+    La generación real de la hora T no se conoce al predecir el CMG de T,
+    por lo que todas las columnas gen_* deben quedar desplazadas 1 hora.
+    La primera fila queda en NaN (no hay hora anterior disponible).
+    """
+    n = 10
+    idx = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    gen_real = {col: [float(100 * j + i) for i in range(n)]
+                for j, col in enumerate(_COLS_GEN)}
+
+    df = pd.DataFrame(gen_real, index=idx)
+    df = _shift_generation(df)
+
+    for col in _COLS_GEN:
+        assert pd.isna(df[col].iloc[0]), f"{col}[0] debe ser NaN tras el shift"
+
+    for i in range(1, n):
+        assert df["gen_solar_mw"].iloc[i] == pytest.approx(gen_real["gen_solar_mw"][i - 1]), (
+            f"gen_solar_mw[{i}] = {df['gen_solar_mw'].iloc[i]} ≠ "
+            f"generación real de T-1 = {gen_real['gen_solar_mw'][i - 1]}"
+        )
+        for col in _COLS_GEN:
+            assert df[col].iloc[i] == pytest.approx(gen_real[col][i - 1])
+
+
+# =============================================================================
+# TEST 6 — LSTM: la ventana de entrada no incluye la hora objetivo
+# =============================================================================
+
+def test_lstm_ventana_excluye_hora_objetivo() -> None:
+    """Verifica que la secuencia LSTM que predice T solo contiene filas < T.
+
+    Cada fila se marca con su propio índice; la ventana que predice la fila
+    T debe terminar exactamente en T-1, de modo que ningún dato de T (ni el
+    target ni la generación) entra al input.
+    """
+    pytest.importorskip("tensorflow", reason="tensorflow no instalado")
+    from models.lstm_model import create_sequences
+
+    window, n = 5, 12
+    data = np.repeat(np.arange(n, dtype=np.float32)[:, None], 3, axis=1)
+
+    X, y = create_sequences(data, window)
+
+    for k in range(len(y)):
+        t_objetivo = int(y[k])
+        assert X[k].max() == t_objetivo - 1, (
+            f"La ventana que predice T={t_objetivo} incluye la fila {X[k].max()}"
+        )

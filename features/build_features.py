@@ -10,7 +10,9 @@ Features generadas:
   - Encoding ciclico: hora del dia, dia de semana, mes del anio
   - Variables de calendario: is_weekend, is_holiday (feriados Chile)
   - Temperatura diaria maxima: temp_max_c desde tabla weather
-  - Generacion por tecnologia: 7 columnas + gen_total_mw
+  - Generacion por tecnologia: 7 columnas + gen_total_mw, desplazadas 1h
+    (shift(1)): en la fila T se usa la generacion observada en T-1, porque la
+    generacion real de la hora T no se conoce al momento de predecir T
   - Nivel de embalses: energy_gwh (propagado forward-fill a resolucion horaria)
 
 Split cronologico (definido en CLAUDE.md):
@@ -232,6 +234,29 @@ def _add_rolling_features(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return df
 
 
+def _shift_generation(df: pd.DataFrame) -> pd.DataFrame:
+    """Desplazar 1 hora todas las columnas de generacion (gen_*).
+
+    La generacion real de la hora T solo se conoce despues de T, por lo que
+    usarla como feature para predecir el CMG de T es fuga de informacion.
+    Tras el shift, la fila T contiene la generacion observada en T-1.
+
+    El shift es por posicion (fila anterior). El indice es horario continuo
+    salvo en los 4 cambios de horario de abril (el CEN omite la hora
+    repetida); en esos puntos la fila anterior esta 2h antes, lo que sigue
+    siendo informacion pasada.
+
+    Args:
+        df: DataFrame con indice DatetimeIndex horario y columnas _COLS_GEN.
+
+    Returns:
+        El mismo DataFrame con las columnas gen_* desplazadas 1 fila.
+    """
+    cols = [c for c in _COLS_GEN if c in df.columns]
+    df[cols] = df[cols].shift(1)
+    return df
+
+
 def _add_cyclic_encoding(df: pd.DataFrame, dt_santiago: pd.DatetimeIndex) -> pd.DataFrame:
     """Agregar encoding ciclico de hora, dia de semana y mes.
 
@@ -340,7 +365,8 @@ def build_feature_matrix(
       2. Inner join CMG x generacion (solo filas con datos en ambas tablas).
       3. Left join embalses y clima con forward-fill a resolucion horaria.
       4. Filtra por el rango de fechas solicitado.
-      5. Agrega lags del target (1h, 2h, 3h, 6h, 12h, 24h, 168h).
+      5. Desplaza 1h las columnas gen_* (sin fuga de la hora objetivo) y
+         agrega lags del target (1h, 2h, 3h, 6h, 12h, 24h, 168h).
       6. Agrega rolling stats (media y std, ventanas 24h y 168h).
       7. Agrega encoding ciclico (hora, dia de semana, mes).
       8. Agrega variables de calendario (is_weekend, is_holiday).
@@ -403,6 +429,7 @@ def build_feature_matrix(
     # ── 5-8. Features temporales y de calendario ──────────────────────────────
     dt_santiago = df.index.tz_convert(TIMEZONE_LOCAL)
 
+    df = _shift_generation(df)
     df = _add_lag_features(df, col="cmg_usd_mwh")
     df = _add_rolling_features(df, col="cmg_usd_mwh")
     df = _add_cyclic_encoding(df, dt_santiago)
